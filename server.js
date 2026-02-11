@@ -1,49 +1,102 @@
 require("dotenv").config();
+
 const express = require("express");
-const multer = require("multer");
 const cors = require("cors");
-const { S3Client, PutObjectCommand, DeleteObjectCommand } = require("@aws-sdk/client-s3");
+const multer = require("multer");
+const mongoose = require("mongoose");
+
+const {
+  S3Client,
+  PutObjectCommand,
+  DeleteObjectCommand,
+} = require("@aws-sdk/client-s3");
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-
-const AUTH_TOKEN = process.env.API_AUTH_TOKEN || "supersecret123"; // хардкод/из env
-
-// Middleware для проверки токена
-function authMiddleware(req, res, next) {
-  const authHeader = req.headers["authorization"];
-  if (!authHeader || authHeader !== `Bearer ${AUTH_TOKEN}`) {
-    return res.status(401).json({ error: "Unauthorized" });
-  }
-  next();
-}
-
-
-// CORS для Android и других клиентов
 app.use(cors());
 app.use(express.json());
 
-// Настройка multer (хранение в памяти)
-const upload = multer({ storage: multer.memoryStorage() });
-const PUBLIC_URL = process.env.R2_PUBLIC_URL;
+/* ============================
+   MongoDB CONNECT
+============================ */
 
+mongoose.connect(process.env.MONGO_URI)
+  .then(() => console.log("✅ MongoDB connected"))
+  .catch(err => console.error("❌ MongoDB error:", err));
 
-// Подключение к R2
+/* ============================
+   APK MODEL
+============================ */
+
+const apkSchema = new mongoose.Schema({
+  title: String,
+  apkUrl: String,
+  iconUrl: String,
+  apkKey: String,
+  iconKey: String,
+  createdAt: {
+    type: Date,
+    default: Date.now,
+  },
+});
+
+const Apk = mongoose.model("Apk", apkSchema);
+
+/* ============================
+   R2 CONFIG
+============================ */
+
 const r2 = new S3Client({
   region: "auto",
-  endpoint: process.env.R2_ENDPOINT, // https://ACCOUNT_ID.r2.cloudflarestorage.com
+  endpoint: process.env.R2_ENDPOINT,
   credentials: {
     accessKeyId: process.env.R2_ACCESS_KEY,
     secretAccessKey: process.env.R2_SECRET_KEY,
   },
 });
 
-let apks = []; 
+/* ============================
+   MULTER
+============================ */
 
-app.get("/apks", (req, res) => {
-  res.json(apks);
+const upload = multer({
+  storage: multer.memoryStorage(),
 });
 
+/* ============================
+   AUTH MIDDLEWARE
+============================ */
+
+function authMiddleware(req, res, next) {
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader) {
+    return res.status(401).json({ error: "No token provided" });
+  }
+
+  const token = authHeader.split(" ")[1];
+
+  if (token !== process.env.ADMIN_TOKEN) {
+    return res.status(401).json({ error: "Invalid token" });
+  }
+
+  next();
+}
+
+/* ============================
+   ROUTES
+============================ */
+
+// GET ALL APKS
+app.get("/apks", async (req, res) => {
+  try {
+    const apks = await Apk.find().sort({ createdAt: -1 });
+    res.json(apks);
+  } catch (err) {
+    res.status(500).json({ error: "Ошибка получения APK" });
+  }
+});
+
+// UPLOAD APK
 app.post(
   "/apks",
   authMiddleware,
@@ -53,20 +106,18 @@ app.post(
   ]),
   async (req, res) => {
     try {
-        
-      const apkFile = req.files.apk?.[0];
-      const iconFile = req.files.icon?.[0];
       const { title } = req.body;
 
-      if (!apkFile) return res.status(400).json({ error: "APK обязателен" });
+      const apkFile = req.files.apk?.[0];
+      const iconFile = req.files.icon?.[0];
 
-      // Генерируем ключи файлов
+      if (!apkFile) {
+        return res.status(400).json({ error: "APK file required" });
+      }
+
+      // Upload APK
       const apkKey = `apks/${Date.now()}-${apkFile.originalname}`;
-      const iconKey = iconFile
-        ? `icons/${Date.now()}-${iconFile.originalname}`
-        : null;
 
-      // Загружаем APK в R2
       await r2.send(
         new PutObjectCommand({
           Bucket: process.env.R2_BUCKET,
@@ -76,8 +127,15 @@ app.post(
         })
       );
 
-      // Загружаем иконку
+      const apkUrl = `${process.env.R2_PUBLIC_URL}/${encodeURIComponent(apkKey)}`;
+
+      // Upload Icon (optional)
+      let iconUrl = null;
+      let iconKey = null;
+
       if (iconFile) {
+        iconKey = `icons/${Date.now()}-${iconFile.originalname}`;
+
         await r2.send(
           new PutObjectCommand({
             Bucket: process.env.R2_BUCKET,
@@ -86,108 +144,33 @@ app.post(
             ContentType: iconFile.mimetype,
           })
         );
+
+        iconUrl = `${process.env.R2_PUBLIC_URL}/${encodeURIComponent(iconKey)}`;
       }
 
-
-// Формируем URL через public domain, с кодированием
-const apkUrl = `${process.env.R2_PUBLIC_URL}/${encodeURIComponent(apkKey)}`;
-const iconUrl = iconKey
-  ? `${process.env.R2_PUBLIC_URL}/${encodeURIComponent(iconKey)}`
-  : null;
-
-
-      // Сохраняем метаданные
-      const newApk = {
-        id: Date.now(),
+      const newApk = await Apk.create({
         title: title || apkFile.originalname,
         apkUrl,
         iconUrl,
         apkKey,
         iconKey,
-        createdAt: new Date().toISOString(),
-      };
-      apks.push(newApk);
+      });
 
       res.json(newApk);
     } catch (err) {
       console.error(err);
-      res.status(500).json({ error: "Ошибка загрузки в R2" });
+      res.status(500).json({ error: "Ошибка загрузки" });
     }
   }
 );
 
-app.put("/apks/:id", authMiddleware, upload.fields([
-  { name: "apk", maxCount: 1 },
-  { name: "icon", maxCount: 1 },
-]), async (req, res) => {
+// DELETE APK
+app.delete("/apks/:id", authMiddleware, async (req, res) => {
   try {
-    const id = Number(req.params.id);
-    const apkIndex = apks.findIndex(a => a.id === id);
-    if (apkIndex === -1) return res.status(404).json({ error: "APK не найден" });
+    const apk = await Apk.findById(req.params.id);
+    if (!apk) return res.status(404).json({ error: "APK not found" });
 
-    const apk = apks[apkIndex];
-    const { title } = req.body;
-    const apkFile = req.files.apk?.[0];
-    const iconFile = req.files.icon?.[0];
-
-    // Обновляем APK
-    if (apkFile) {
-      const apkKey = `apks/${Date.now()}-${apkFile.originalname}`;
-      await r2.send(new PutObjectCommand({
-        Bucket: process.env.R2_BUCKET,
-        Key: apkKey,
-        Body: apkFile.buffer,
-        ContentType: apkFile.mimetype,
-      }));
-      // Удаляем старый файл
-      await r2.send(new DeleteObjectCommand({ Bucket: process.env.R2_BUCKET, Key: apk.apkKey }));
-      apk.apkKey = apkKey;
-      apk.apkUrl = `${process.env.R2_PUBLIC_URL}/${encodeURIComponent(apkKey)}`;
-    }
-
-    // Обновляем иконку
-    if (iconFile) {
-      const iconKey = `icons/${Date.now()}-${iconFile.originalname}`;
-      await r2.send(new PutObjectCommand({
-        Bucket: process.env.R2_BUCKET,
-        Key: iconKey,
-        Body: iconFile.buffer,
-        ContentType: iconFile.mimetype,
-      }));
-      if (apk.iconKey) {
-        await r2.send(new DeleteObjectCommand({ Bucket: process.env.R2_BUCKET, Key: apk.iconKey }));
-      }
-      apk.iconKey = iconKey;
-      apk.iconUrl = `${process.env.R2_PUBLIC_URL}/${encodeURIComponent(iconKey)}`;
-    }
-
-    // Обновляем title
-    if (title) {
-      apk.title = `${title} (NEW)`;
-    }
-
-    apks[apkIndex] = apk;
-    res.json(apk);
-
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Ошибка обновления APK" });
-  }
-});
-
-
-// DELETE /apks/:id — удалить приложение и файлы из R2
-app.delete("/apks/:id",authMiddleware, async (req, res) => {
-  const id = Number(req.params.id);
-  const apkIndex = apks.findIndex((a) => a.id === id);
-
-  if (apkIndex === -1)
-    return res.status(404).json({ error: "APK не найден" });
-
-  const apk = apks[apkIndex];
-
-  try {
-    // Удаляем APK
+    // Delete APK file
     await r2.send(
       new DeleteObjectCommand({
         Bucket: process.env.R2_BUCKET,
@@ -195,7 +178,7 @@ app.delete("/apks/:id",authMiddleware, async (req, res) => {
       })
     );
 
-    // Удаляем иконку, если есть
+    // Delete icon if exists
     if (apk.iconKey) {
       await r2.send(
         new DeleteObjectCommand({
@@ -205,17 +188,21 @@ app.delete("/apks/:id",authMiddleware, async (req, res) => {
       );
     }
 
-    // Удаляем из памяти / MongoDB
-    apks.splice(apkIndex, 1);
+    await Apk.findByIdAndDelete(req.params.id);
 
-    res.json({ message: "APK и иконка удалены" });
+    res.json({ message: "APK deleted" });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "Ошибка удаления файлов из R2" });
+    res.status(500).json({ error: "Ошибка удаления" });
   }
 });
 
-// Запуск сервера
+/* ============================
+   START SERVER
+============================ */
+
+const PORT = process.env.PORT || 5000;
+
 app.listen(PORT, () => {
-  console.log(`Сервер запущен на http://localhost:${PORT}`);
+  console.log(`🚀 Server running on port ${PORT}`);
 });
