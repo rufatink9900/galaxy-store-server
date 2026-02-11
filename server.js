@@ -7,6 +7,18 @@ const { S3Client, PutObjectCommand, DeleteObjectCommand } = require("@aws-sdk/cl
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+const AUTH_TOKEN = process.env.API_AUTH_TOKEN || "supersecret123"; // хардкод/из env
+
+// Middleware для проверки токена
+function authMiddleware(req, res, next) {
+  const authHeader = req.headers["authorization"];
+  if (!authHeader || authHeader !== `Bearer ${AUTH_TOKEN}`) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  next();
+}
+
+
 // CORS для Android и других клиентов
 app.use(cors());
 app.use(express.json());
@@ -34,6 +46,7 @@ app.get("/apks", (req, res) => {
 
 app.post(
   "/apks",
+  authMiddleware,
   upload.fields([
     { name: "apk", maxCount: 1 },
     { name: "icon", maxCount: 1 },
@@ -103,8 +116,68 @@ const iconUrl = iconKey
   }
 );
 
+app.put("/apks/:id", authMiddleware, upload.fields([
+  { name: "apk", maxCount: 1 },
+  { name: "icon", maxCount: 1 },
+]), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const apkIndex = apks.findIndex(a => a.id === id);
+    if (apkIndex === -1) return res.status(404).json({ error: "APK не найден" });
+
+    const apk = apks[apkIndex];
+    const { title } = req.body;
+    const apkFile = req.files.apk?.[0];
+    const iconFile = req.files.icon?.[0];
+
+    // Обновляем APK
+    if (apkFile) {
+      const apkKey = `apks/${Date.now()}-${apkFile.originalname}`;
+      await r2.send(new PutObjectCommand({
+        Bucket: process.env.R2_BUCKET,
+        Key: apkKey,
+        Body: apkFile.buffer,
+        ContentType: apkFile.mimetype,
+      }));
+      // Удаляем старый файл
+      await r2.send(new DeleteObjectCommand({ Bucket: process.env.R2_BUCKET, Key: apk.apkKey }));
+      apk.apkKey = apkKey;
+      apk.apkUrl = `${process.env.R2_PUBLIC_URL}/${encodeURIComponent(apkKey)}`;
+    }
+
+    // Обновляем иконку
+    if (iconFile) {
+      const iconKey = `icons/${Date.now()}-${iconFile.originalname}`;
+      await r2.send(new PutObjectCommand({
+        Bucket: process.env.R2_BUCKET,
+        Key: iconKey,
+        Body: iconFile.buffer,
+        ContentType: iconFile.mimetype,
+      }));
+      if (apk.iconKey) {
+        await r2.send(new DeleteObjectCommand({ Bucket: process.env.R2_BUCKET, Key: apk.iconKey }));
+      }
+      apk.iconKey = iconKey;
+      apk.iconUrl = `${process.env.R2_PUBLIC_URL}/${encodeURIComponent(iconKey)}`;
+    }
+
+    // Обновляем title
+    if (title) {
+      apk.title = `${title} (NEW)`;
+    }
+
+    apks[apkIndex] = apk;
+    res.json(apk);
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Ошибка обновления APK" });
+  }
+});
+
+
 // DELETE /apks/:id — удалить приложение и файлы из R2
-app.delete("/apks/:id", async (req, res) => {
+app.delete("/apks/:id",authMiddleware, async (req, res) => {
   const id = Number(req.params.id);
   const apkIndex = apks.findIndex((a) => a.id === id);
 
