@@ -59,6 +59,8 @@ const apkSchema = new mongoose.Schema({
     iconUrl: String,
     apkKey: String,
     iconKey: String,
+    packageName: { type: String, required: true },
+
     createdAt: { type: Date, default: Date.now },
 });
 const Apk = mongoose.model("Apk", apkSchema);
@@ -209,7 +211,12 @@ app.post(
     async (req, res) => {
         try {
             console.log("📦 Uploading APK...");
-            const { title } = req.body;
+            const { title, packageName } = req.body;
+
+            if (!packageName) {
+            return res.status(400).json({ error: "packageName is required" });
+            }
+
             const apkFile = req.files?.apk?.[0];
             const iconFile = req.files?.icon?.[0];
 
@@ -246,12 +253,13 @@ app.post(
 
             // Сохранение в БД
             const newApk = await Apk.create({
-                title: title || apkFile.originalname,
-                apkUrl,
-                iconUrl,
-                apkKey,
-                iconKey
-            });
+    title: title || apkFile.originalname,
+    packageName, 
+    apkUrl,
+    iconUrl,
+    apkKey,
+    iconKey
+});
             
             console.log("✅ APK saved to DB:", newApk._id);
             res.status(201).json(newApk);
