@@ -307,8 +307,7 @@ app.delete("/apks/:id", authMiddleware, async (req, res) => {
     }
 });
 
-// OPTIONS handler для всех маршрутов
-app.options("*", cors());
+
 
 /* ======================
    ERROR HANDLER
