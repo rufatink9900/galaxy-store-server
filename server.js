@@ -78,9 +78,9 @@ function authMiddleware(req, res, next) {
    LOGIN ROUTE
 ====================== */
 app.post("/login", async (req, res) => {
-  const { username, password } = req.body;
+  const { login, password } = req.body; 
   try {
-    const admin = await Admin.findOne({ login: username });
+    const admin = await Admin.findOne({ login }); 
     if (!admin) return res.status(401).json({ error: "Invalid credentials" });
 
     const validPassword = await bcrypt.compare(password, admin.password);
@@ -93,6 +93,7 @@ app.post("/login", async (req, res) => {
     res.status(500).json({ error: "Server error" });
   }
 });
+
 
 /* ======================
    APK ROUTES
