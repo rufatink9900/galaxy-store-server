@@ -55,14 +55,33 @@ const Admin = mongoose.model("Admin", adminSchema);
 // APK
 const apkSchema = new mongoose.Schema({
     title: String,
+
+    description: {
+        type: String,
+        required: true
+    },
+
+    version: {
+        type: String, // например "1.0.3"
+        required: false
+    },
+
     apkUrl: String,
     iconUrl: String,
     apkKey: String,
     iconKey: String,
-    packageName: { type: String, required: true },
 
-    createdAt: { type: Date, default: Date.now },
+    packageName: {
+        type: String,
+        required: true
+    },
+
+    createdAt: {
+        type: Date,
+        default: Date.now
+    },
 });
+
 const Apk = mongoose.model("Apk", apkSchema);
 
 /* ======================
@@ -211,10 +230,23 @@ app.post(
     async (req, res) => {
         try {
             console.log("📦 Uploading APK...");
-            const { title, packageName } = req.body;
 
+            const {
+                title,
+                packageName,
+                description,
+                version // 👈 необязательное
+            } = req.body;
+
+            // --------------------
+            // ВАЛИДАЦИЯ
+            // --------------------
             if (!packageName) {
-            return res.status(400).json({ error: "packageName is required" });
+                return res.status(400).json({ error: "packageName is required" });
+            }
+
+            if (!description) {
+                return res.status(400).json({ error: "description is required" });
             }
 
             const apkFile = req.files?.apk?.[0];
@@ -224,52 +256,73 @@ app.post(
                 return res.status(400).json({ error: "APK file is required" });
             }
 
-            // Загрузка APK в R2
-            const apkKey = `apks/${Date.now()}-${apkFile.originalname.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
-            await r2.send(new PutObjectCommand({
-                Bucket: process.env.R2_BUCKET,
-                Key: apkKey,
-                Body: apkFile.buffer,
-                ContentType: apkFile.mimetype,
-            }));
-            
-            const apkUrl = `${process.env.R2_PUBLIC_URL}/${encodeURIComponent(apkKey)}`;
-            console.log("✅ APK uploaded, key:", apkKey);
+            // --------------------
+            // ЗАГРУЗКА APK В R2
+            // --------------------
+            const apkKey = `apks/${Date.now()}-${apkFile.originalname.replace(/[^a-zA-Z0-9.-]/g, "_")}`;
 
-            // Загрузка иконки (если есть)
+            await r2.send(
+                new PutObjectCommand({
+                    Bucket: process.env.R2_BUCKET,
+                    Key: apkKey,
+                    Body: apkFile.buffer,
+                    ContentType: apkFile.mimetype,
+                })
+            );
+
+            const apkUrl = `${process.env.R2_PUBLIC_URL}/${encodeURIComponent(apkKey)}`;
+            console.log("✅ APK uploaded:", apkKey);
+
+            // --------------------
+            // ЗАГРУЗКА ИКОНКИ (ЕСЛИ ЕСТЬ)
+            // --------------------
             let iconUrl = null;
             let iconKey = null;
+
             if (iconFile) {
-                iconKey = `icons/${Date.now()}-${iconFile.originalname.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
-                await r2.send(new PutObjectCommand({
-                    Bucket: process.env.R2_BUCKET,
-                    Key: iconKey,
-                    Body: iconFile.buffer,
-                    ContentType: iconFile.mimetype,
-                }));
+                iconKey = `icons/${Date.now()}-${iconFile.originalname.replace(/[^a-zA-Z0-9.-]/g, "_")}`;
+
+                await r2.send(
+                    new PutObjectCommand({
+                        Bucket: process.env.R2_BUCKET,
+                        Key: iconKey,
+                        Body: iconFile.buffer,
+                        ContentType: iconFile.mimetype,
+                    })
+                );
+
                 iconUrl = `${process.env.R2_PUBLIC_URL}/${encodeURIComponent(iconKey)}`;
-                console.log("✅ Icon uploaded, key:", iconKey);
+                console.log("✅ Icon uploaded:", iconKey);
             }
 
-            // Сохранение в БД
+            // --------------------
+            // СОХРАНЕНИЕ В БД
+            // --------------------
             const newApk = await Apk.create({
-    title: title || apkFile.originalname,
-    packageName, 
-    apkUrl,
-    iconUrl,
-    apkKey,
-    iconKey
-});
-            
+                title: title || apkFile.originalname,
+                description,              // 👈 обязательно
+                version: version || null, // 👈 необязательно
+                packageName,
+                apkUrl,
+                iconUrl,
+                apkKey,
+                iconKey,
+            });
+
             console.log("✅ APK saved to DB:", newApk._id);
+
             res.status(201).json(newApk);
 
         } catch (err) {
             console.error("❌ Upload error:", err);
-            res.status(500).json({ error: "Upload failed: " + err.message });
+            res.status(500).json({
+                error: "Upload failed",
+                details: err.message,
+            });
         }
     }
 );
+
 
 // DELETE APK (protected)
 app.delete("/apks/:id", authMiddleware, async (req, res) => {
