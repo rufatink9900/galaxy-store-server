@@ -219,6 +219,20 @@ app.get("/apks", async (req, res) => {
     }
 });
 
+// GET single APK by ID (public)
+app.get("/apks/:id", async (req, res) => {
+    try {
+        const apk = await Apk.findById(req.params.id);
+        if (!apk) {
+            return res.status(404).json({ error: "APK not found" });
+        }
+        res.json(apk);
+    } catch (err) {
+        console.error("❌ Error fetching APK:", err);
+        res.status(500).json({ error: "Server error" });
+    }
+});
+
 // UPLOAD APK (protected)
 app.post(
     "/apks",
@@ -323,6 +337,138 @@ app.post(
     }
 );
 
+// UPDATE APK (protected) - НОВЫЙ PUT МЕТОД
+app.put(
+    "/apks/:id",
+    authMiddleware,
+    upload.fields([
+        { name: "apk", maxCount: 1 },
+        { name: "icon", maxCount: 1 },
+    ]),
+    async (req, res) => {
+        try {
+            console.log("📝 Updating APK:", req.params.id);
+
+            const {
+                title,
+                packageName,
+                description,
+                version
+            } = req.body;
+
+            // --------------------
+            // ПОИСК СУЩЕСТВУЮЩЕГО APK
+            // --------------------
+            const existingApk = await Apk.findById(req.params.id);
+            if (!existingApk) {
+                return res.status(404).json({ error: "APK not found" });
+            }
+
+            // --------------------
+            // ПОДГОТОВКА ДАННЫХ ДЛЯ ОБНОВЛЕНИЯ
+            // --------------------
+            const updateData = {
+                title: title || existingApk.title,
+                packageName: packageName || existingApk.packageName,
+                description: description || existingApk.description,
+                version: version || existingApk.version,
+            };
+
+            const apkFile = req.files?.apk?.[0];
+            const iconFile = req.files?.icon?.[0];
+
+            // --------------------
+            // ОБНОВЛЕНИЕ APK ФАЙЛА (ЕСЛИ ЗАГРУЖЕН НОВЫЙ)
+            // --------------------
+            if (apkFile) {
+                console.log("🔄 Updating APK file...");
+                
+                // Удаляем старый файл из R2
+                try {
+                    await r2.send(new DeleteObjectCommand({ 
+                        Bucket: process.env.R2_BUCKET, 
+                        Key: existingApk.apkKey 
+                    }));
+                    console.log("✅ Old APK file deleted from R2");
+                } catch (r2Error) {
+                    console.error("❌ Error deleting old APK from R2:", r2Error);
+                    // Продолжаем, даже если не удалось удалить старый файл
+                }
+
+                // Загружаем новый файл
+                const newApkKey = `apks/${Date.now()}-${apkFile.originalname.replace(/[^a-zA-Z0-9.-]/g, "_")}`;
+                
+                await r2.send(
+                    new PutObjectCommand({
+                        Bucket: process.env.R2_BUCKET,
+                        Key: newApkKey,
+                        Body: apkFile.buffer,
+                        ContentType: apkFile.mimetype,
+                    })
+                );
+
+                updateData.apkKey = newApkKey;
+                updateData.apkUrl = `${process.env.R2_PUBLIC_URL}/${encodeURIComponent(newApkKey)}`;
+                console.log("✅ New APK uploaded:", newApkKey);
+            }
+
+            // --------------------
+            // ОБНОВЛЕНИЕ ИКОНКИ (ЕСЛИ ЗАГРУЖЕНА НОВАЯ)
+            // --------------------
+            if (iconFile) {
+                console.log("🔄 Updating icon...");
+                
+                // Удаляем старую иконку из R2 (если есть)
+                if (existingApk.iconKey) {
+                    try {
+                        await r2.send(new DeleteObjectCommand({ 
+                            Bucket: process.env.R2_BUCKET, 
+                            Key: existingApk.iconKey 
+                        }));
+                        console.log("✅ Old icon deleted from R2");
+                    } catch (r2Error) {
+                        console.error("❌ Error deleting old icon from R2:", r2Error);
+                    }
+                }
+
+                // Загружаем новую иконку
+                const newIconKey = `icons/${Date.now()}-${iconFile.originalname.replace(/[^a-zA-Z0-9.-]/g, "_")}`;
+                
+                await r2.send(
+                    new PutObjectCommand({
+                        Bucket: process.env.R2_BUCKET,
+                        Key: newIconKey,
+                        Body: iconFile.buffer,
+                        ContentType: iconFile.mimetype,
+                    })
+                );
+
+                updateData.iconKey = newIconKey;
+                updateData.iconUrl = `${process.env.R2_PUBLIC_URL}/${encodeURIComponent(newIconKey)}`;
+                console.log("✅ New icon uploaded:", newIconKey);
+            }
+
+            // --------------------
+            // ОБНОВЛЕНИЕ В БД
+            // --------------------
+            const updatedApk = await Apk.findByIdAndUpdate(
+                req.params.id,
+                updateData,
+                { new: true } // возвращает обновленный документ
+            );
+
+            console.log("✅ APK updated in DB:", updatedApk._id);
+            res.json(updatedApk);
+
+        } catch (err) {
+            console.error("❌ Update error:", err);
+            res.status(500).json({
+                error: "Update failed",
+                details: err.message,
+            });
+        }
+    }
+);
 
 // DELETE APK (protected)
 app.delete("/apks/:id", authMiddleware, async (req, res) => {
@@ -365,8 +511,6 @@ app.delete("/apks/:id", authMiddleware, async (req, res) => {
         res.status(500).json({ error: "Server error" });
     }
 });
-
-
 
 /* ======================
    ERROR HANDLER
