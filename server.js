@@ -64,8 +64,9 @@ const apkSchema = new mongoose.Schema({
         required: false
     },
     versionCode: {
-        type: Number, // для сравнения 103
-        required: true
+        type: Number, // для сравнения версий (103)
+        required: true,
+        default: 1
     },
     apkUrl: String,
     iconUrl: String,
@@ -126,7 +127,7 @@ function authMiddleware(req, res, next) {
 }
 
 /* ======================
-   HEALTH CHECK - для проверки работы сервера
+   HEALTH CHECK
 ====================== */
 app.get("/", (req, res) => {
     res.json({ status: "ok", message: "Server is running" });
@@ -137,7 +138,7 @@ app.get("/health", (req, res) => {
 });
 
 /* ======================
-   LOGIN ROUTE - ИСПРАВЛЕН
+   LOGIN ROUTE
 ====================== */
 app.post("/login", async (req, res) => {
     console.log("🔐 LOGIN ATTEMPT");
@@ -147,13 +148,11 @@ app.post("/login", async (req, res) => {
     try {
         const { login, password } = req.body;
         
-        // Проверка наличия полей
         if (!login || !password) {
             console.log("❌ Missing login or password");
             return res.status(400).json({ error: "Login and password are required" });
         }
 
-        // Поиск админа
         const admin = await Admin.findOne({ login });
         if (!admin) {
             console.log("❌ Admin not found:", login);
@@ -161,7 +160,6 @@ app.post("/login", async (req, res) => {
         }
         console.log("✅ Admin found:", admin.login);
 
-        // Проверка пароля
         const validPassword = await bcrypt.compare(password, admin.password);
         if (!validPassword) {
             console.log("❌ Invalid password for:", login);
@@ -169,7 +167,6 @@ app.post("/login", async (req, res) => {
         }
         console.log("✅ Password valid");
 
-        // Создание токена
         const token = jwt.sign(
             { adminId: admin._id }, 
             process.env.JWT_SECRET, 
@@ -189,7 +186,7 @@ app.post("/login", async (req, res) => {
 });
 
 /* ======================
-   DEBUG ROUTE - ТОЛЬКО ДЛЯ ОТЛАДКИ, УДАЛИТЬ ПОТОМ
+   DEBUG ROUTE
 ====================== */
 app.get("/debug/admins", async (req, res) => {
     try {
@@ -248,7 +245,8 @@ app.post(
                 title,
                 packageName,
                 description,
-                version // 👈 необязательное
+                version,
+                versionCode // 👈 ПОЛУЧАЕМ versionCode
             } = req.body;
 
             // --------------------
@@ -260,6 +258,10 @@ app.post(
 
             if (!description) {
                 return res.status(400).json({ error: "description is required" });
+            }
+
+            if (!versionCode) {
+                return res.status(400).json({ error: "versionCode is required" });
             }
 
             const apkFile = req.files?.apk?.[0];
@@ -309,12 +311,13 @@ app.post(
             }
 
             // --------------------
-            // СОХРАНЕНИЕ В БД
+            // СОХРАНЕНИЕ В БД С versionCode
             // --------------------
             const newApk = await Apk.create({
                 title: title || apkFile.originalname,
-                description,              // 👈 обязательно
-                version: version || null, // 👈 необязательно
+                description,
+                version: version || null,
+                versionCode: parseInt(versionCode) || 1, // 👈 СОХРАНЯЕМ versionCode
                 packageName,
                 apkUrl,
                 iconUrl,
@@ -323,6 +326,7 @@ app.post(
             });
 
             console.log("✅ APK saved to DB:", newApk._id);
+            console.log("   versionCode:", newApk.versionCode);
 
             res.status(201).json(newApk);
 
@@ -336,7 +340,7 @@ app.post(
     }
 );
 
-// UPDATE APK (protected) - НОВЫЙ PUT МЕТОД
+// UPDATE APK (protected)
 app.put(
     "/apks/:id",
     authMiddleware,
@@ -353,7 +357,7 @@ app.put(
                 packageName,
                 description,
                 version,
-                versionCode // 👈 Добавь это поле
+                versionCode // 👈 ПОЛУЧАЕМ versionCode
             } = req.body;
 
             const existingApk = await Apk.findById(req.params.id);
@@ -361,26 +365,26 @@ app.put(
                 return res.status(404).json({ error: "APK not found" });
             }
 
+            console.log("Existing versionCode:", existingApk.versionCode);
+            console.log("New versionCode from request:", versionCode);
+
             const updateData = {
                 title: title || existingApk.title,
                 packageName: packageName || existingApk.packageName,
                 description: description || existingApk.description,
                 version: version || existingApk.version,
-                versionCode: versionCode !== undefined ? parseInt(versionCode) : existingApk.versionCode,
+                versionCode: versionCode !== undefined ? parseInt(versionCode) : existingApk.versionCode, // 👈 ИСПРАВЛЕНО
             };
-
-            
 
             const apkFile = req.files?.apk?.[0];
             const iconFile = req.files?.icon?.[0];
 
             // --------------------
-            // ОБНОВЛЕНИЕ APK ФАЙЛА (ЕСЛИ ЗАГРУЖЕН НОВЫЙ)
+            // ОБНОВЛЕНИЕ APK ФАЙЛА
             // --------------------
             if (apkFile) {
                 console.log("🔄 Updating APK file...");
                 
-                // Удаляем старый файл из R2
                 try {
                     await r2.send(new DeleteObjectCommand({ 
                         Bucket: process.env.R2_BUCKET, 
@@ -389,10 +393,8 @@ app.put(
                     console.log("✅ Old APK file deleted from R2");
                 } catch (r2Error) {
                     console.error("❌ Error deleting old APK from R2:", r2Error);
-                    // Продолжаем, даже если не удалось удалить старый файл
                 }
 
-                // Загружаем новый файл
                 const newApkKey = `apks/${Date.now()}-${apkFile.originalname.replace(/[^a-zA-Z0-9.-]/g, "_")}`;
                 
                 await r2.send(
@@ -410,12 +412,11 @@ app.put(
             }
 
             // --------------------
-            // ОБНОВЛЕНИЕ ИКОНКИ (ЕСЛИ ЗАГРУЖЕНА НОВАЯ)
+            // ОБНОВЛЕНИЕ ИКОНКИ
             // --------------------
             if (iconFile) {
                 console.log("🔄 Updating icon...");
                 
-                // Удаляем старую иконку из R2 (если есть)
                 if (existingApk.iconKey) {
                     try {
                         await r2.send(new DeleteObjectCommand({ 
@@ -428,7 +429,6 @@ app.put(
                     }
                 }
 
-                // Загружаем новую иконку
                 const newIconKey = `icons/${Date.now()}-${iconFile.originalname.replace(/[^a-zA-Z0-9.-]/g, "_")}`;
                 
                 await r2.send(
@@ -451,10 +451,11 @@ app.put(
             const updatedApk = await Apk.findByIdAndUpdate(
                 req.params.id,
                 updateData,
-                { new: true } // возвращает обновленный документ
+                { new: true }
             );
 
             console.log("✅ APK updated in DB:", updatedApk._id);
+            console.log("   New versionCode:", updatedApk.versionCode);
             res.json(updatedApk);
 
         } catch (err) {
@@ -477,7 +478,6 @@ app.delete("/apks/:id", authMiddleware, async (req, res) => {
             return res.status(404).json({ error: "APK not found" });
         }
 
-        // Удаление файлов из R2
         try {
             await r2.send(new DeleteObjectCommand({ 
                 Bucket: process.env.R2_BUCKET, 
@@ -494,10 +494,8 @@ app.delete("/apks/:id", authMiddleware, async (req, res) => {
             }
         } catch (r2Error) {
             console.error("❌ Error deleting from R2:", r2Error);
-            // Продолжаем удаление из БД даже если R2 не смог удалить
         }
 
-        // Удаление из БД
         await Apk.findByIdAndDelete(req.params.id);
         console.log("✅ APK deleted from DB");
         
@@ -517,7 +515,6 @@ app.use((err, req, res, next) => {
     res.status(500).json({ error: "Internal server error" });
 });
 
-// 404 handler
 app.use((req, res) => {
     res.status(404).json({ error: "Route not found" });
 });
