@@ -52,30 +52,29 @@ const adminSchema = new mongoose.Schema({
 });
 const Admin = mongoose.model("Admin", adminSchema);
 
-// APK
+// APK Schema с versionCode
 const apkSchema = new mongoose.Schema({
     title: String,
-
     description: {
         type: String,
         required: true
     },
-
     version: {
-        type: String, // например "1.0.3"
+        type: String, // для отображения "1.0.3"
         required: false
     },
-
+    versionCode: {
+        type: Number, // для сравнения 103
+        required: true
+    },
     apkUrl: String,
     iconUrl: String,
     apkKey: String,
     iconKey: String,
-
     packageName: {
         type: String,
         required: true
     },
-
     createdAt: {
         type: Date,
         default: Date.now
@@ -353,26 +352,24 @@ app.put(
                 title,
                 packageName,
                 description,
-                version
+                version,
+                versionCode // 👈 Добавь это поле
             } = req.body;
 
-            // --------------------
-            // ПОИСК СУЩЕСТВУЮЩЕГО APK
-            // --------------------
             const existingApk = await Apk.findById(req.params.id);
             if (!existingApk) {
                 return res.status(404).json({ error: "APK not found" });
             }
 
-            // --------------------
-            // ПОДГОТОВКА ДАННЫХ ДЛЯ ОБНОВЛЕНИЯ
-            // --------------------
             const updateData = {
                 title: title || existingApk.title,
                 packageName: packageName || existingApk.packageName,
                 description: description || existingApk.description,
                 version: version || existingApk.version,
+                versionCode: versionCode !== undefined ? parseInt(versionCode) : existingApk.versionCode,
             };
+
+            
 
             const apkFile = req.files?.apk?.[0];
             const iconFile = req.files?.icon?.[0];
